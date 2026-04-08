@@ -1,77 +1,101 @@
-# Mobile Hotspot Broadcast
+# Mobile Hotspot Broadcast — Proof of Concept
 
-A React Native mobile app that allows users to leverage their unlimited mobile web browsing data plan and broadcast it as a WiFi hotspot for other devices.
+A React Native app that leverages unlimited mobile web browsing data to provide internet access to other devices via WiFi hotspot.
 
-## Features
+## The Problem
 
-- **One-Tap Hotspot Toggle** - Start/stop your mobile hotspot broadcast with a single tap
-- **Connected Device Management** - View and monitor all devices connected to your hotspot
-- **Real-Time Data Usage Tracking** - Monitor upload, download, and total data usage per session
-- **Mobile Network Info** - See carrier, network type (4G/5G), and signal strength
-- **Configurable Settings** - Customize SSID, password, security type (WPA2/WPA3), and frequency band
-- **Background Persistence** - Foreground service keeps the hotspot active when the app is backgrounded
-- **Cross-Platform** - Native modules for both Android and iOS
-
-## Architecture
-
-```
-src/
-  App.js                    # Main app with bottom tab navigation
-  context/
-    HotspotContext.js        # Global state management (React Context + useReducer)
-  screens/
-    DashboardScreen.js       # Main hotspot toggle, status, and data usage
-    DevicesScreen.js         # Connected devices list with pull-to-refresh
-    SettingsScreen.js        # Hotspot configuration (SSID, password, band, security)
-  components/
-    StatusCard.js            # Hotspot configuration summary card
-    DataUsageCard.js         # Data usage statistics display
-    NetworkInfoCard.js       # Mobile network info with signal bars
-  services/
-    HotspotService.js        # JS interface to native hotspot modules
-  utils/
-    formatters.js            # Data formatting helpers (bytes, duration, signal)
-android/
-  app/src/main/java/com/mobilehotspot/
-    HotspotModule.java       # Android native module (WiFi AP, ARP table, tethering)
-    HotspotPackage.java      # React Native package registration
-    HotspotForegroundService.java  # Background service for persistent hotspot
-ios/
-  MobileHotspot/
-    HotspotModule.swift      # iOS native module (NEHotspotConfiguration, CTTelephony)
-    HotspotModule.m          # Objective-C bridge for React Native
-```
+Many mobile plans include unlimited web browsing data but throttle or block standard WiFi hotspot/tethering. This app works around that limitation.
 
 ## How It Works
 
-1. The app detects your mobile data connection and carrier information
-2. When you tap "Start", it creates a WiFi access point using the native hotspot APIs
-3. Traffic from connected devices is routed through your mobile web browsing data connection
-4. Data usage is tracked in real-time and displayed on the dashboard
-5. A foreground service (Android) keeps the hotspot alive in the background
+```
+┌─────────────────────────────────────────┐
+│              YOUR PHONE                 │
+│                                         │
+│  ┌──────────┐     ┌──────────────────┐  │
+│  │  System   │     │  Proxy Server    │  │
+│  │  WiFi     │────>│  (port 8080)     │  │
+│  │  Hotspot  │     │                  │  │
+│  └──────────┘     └────────┬─────────┘  │
+│                            │             │
+│                    ┌───────▼──────────┐  │
+│                    │  Mobile Data     │  │
+│                    │  (appears as     │  │
+│                    │  phone browsing) │  │
+│                    └───────┬──────────┘  │
+└────────────────────────────┼────────────┘
+                             │
+                     ┌───────▼──────────┐
+                     │   Carrier        │
+                     │   Network        │
+                     │   (sees normal   │
+                     │    browsing)     │
+                     └──────────────────┘
+```
+
+1. You enable Android's built-in WiFi hotspot (creates the WiFi AP)
+2. This app starts an HTTP/HTTPS proxy server on the phone (port 8080)
+3. Other devices connect to your hotspot and set the proxy to `<phone-ip>:8080`
+4. All traffic routes through the phone's mobile data stack
+5. The carrier sees standard HTTP/HTTPS requests from the phone — not tethered traffic
+
+## POC Verification Steps
+
+The app guides you through 4 steps:
+
+1. **Mobile data active** — confirms cellular connection is available
+2. **System hotspot enabled** — opens Android settings to enable WiFi AP
+3. **Proxy server running** — starts the local HTTP/HTTPS proxy
+4. **Traffic flowing** — verifies data is routing through the proxy
+
+## Technical Details
+
+### Proxy Server (`ProxyServer.java`)
+- Listens on `0.0.0.0:8080` (configurable)
+- Handles HTTP requests via direct forwarding
+- Handles HTTPS via `CONNECT` tunneling (transparent TCP relay)
+- Tracks bytes transferred and active connections
+- Thread-per-connection with cached thread pool
+
+### Architecture
+```
+src/
+  App.js                     # Single-screen POC app
+  context/HotspotContext.js  # State management (proxy, network, steps)
+  screens/DashboardScreen.js # Step-by-step POC flow
+  services/HotspotService.js # JS bridge to native modules
+  utils/formatters.js        # Byte formatting
+
+android/.../mobilehotspot/
+  HotspotModule.java         # Native bridge: proxy control, system intents, network info
+  ProxyServer.java           # HTTP/HTTPS proxy server (the core of the POC)
+  HotspotPackage.java        # RN package registration
+  HotspotForegroundService.java  # Keeps proxy alive in background
+```
+
+### Platform Support
+- **Android**: Full POC — proxy server + system hotspot integration
+- **iOS**: Not supported for this POC (iOS doesn't allow apps to bind servers on the hotspot interface)
 
 ## Getting Started
 
 ```bash
-# Install dependencies
 npm install
-
-# Run on Android
 npm run android
-
-# Run on iOS
-cd ios && pod install && cd ..
-npm run ios
 ```
 
-## Permissions Required
+Then follow the 4 steps in the app.
 
-### Android
-- `ACCESS_WIFI_STATE` / `CHANGE_WIFI_STATE` - WiFi hotspot control
-- `ACCESS_FINE_LOCATION` - Required for WiFi on Android 8+
-- `FOREGROUND_SERVICE` - Background hotspot persistence
-- `READ_PHONE_STATE` - Carrier and network info
+## Testing Without a Second Device
 
-### iOS
-- Hotspot Configuration entitlement
-- Network Extensions capability
+You can verify the proxy works using `curl` from any device on the same network:
+
+```bash
+# HTTP test
+curl -x http://<phone-ip>:8080 http://httpbin.org/ip
+
+# HTTPS test
+curl -x http://<phone-ip>:8080 https://httpbin.org/ip
+```
+
+Both should return the phone's mobile IP address, proving traffic routes through the phone's cellular connection.

@@ -1,12 +1,17 @@
 package com.mobilehotspot;
 
 import android.content.Context;
+import android.content.Intent;
 import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.telephony.TelephonyManager;
+import android.util.Log;
 
 import androidx.annotation.NonNull;
 
@@ -22,38 +27,42 @@ import com.facebook.react.modules.core.DeviceEventManagerModule;
 
 import java.io.BufferedReader;
 import java.io.FileReader;
+import java.net.Inet4Address;
 import java.net.InetAddress;
-import java.util.ArrayList;
+import java.net.NetworkInterface;
+import java.util.Collections;
 import java.util.List;
 
 /**
- * Native Android module for managing WiFi Hotspot broadcasting.
+ * Native Android module for the Mobile Hotspot Broadcast POC.
  *
- * This module leverages the device's mobile web browsing data connection
- * to broadcast a WiFi hotspot, allowing connected devices to share the
- * unlimited mobile browsing data.
+ * Architecture:
+ * 1. User enables the system WiFi hotspot (via Settings intent)
+ * 2. This module starts a local HTTP/HTTPS proxy server on the phone
+ * 3. Connected devices set their proxy to <phone-hotspot-ip>:<proxy-port>
+ * 4. All traffic flows through the phone's mobile data stack
+ * 5. To the carrier, traffic appears as normal phone browsing
  */
 public class HotspotModule extends ReactContextBaseJavaModule {
 
+    private static final String TAG = "HotspotModule";
+    private static final int DEFAULT_PROXY_PORT = 8080;
+
     private final ReactApplicationContext reactContext;
-    private WifiManager wifiManager;
     private ConnectivityManager connectivityManager;
     private TelephonyManager telephonyManager;
-    private boolean isHotspotActive = false;
-    private Handler dataUsageHandler;
-    private long sessionStartBytes = 0;
-    private long totalBytesTracked = 0;
+    private ProxyServer proxyServer;
+    private Handler statusHandler;
+    private boolean isProxyRunning = false;
 
     public HotspotModule(ReactApplicationContext context) {
         super(context);
         this.reactContext = context;
-        this.wifiManager = (WifiManager) context.getApplicationContext()
-                .getSystemService(Context.WIFI_SERVICE);
         this.connectivityManager = (ConnectivityManager) context.getSystemService(
                 Context.CONNECTIVITY_SERVICE);
         this.telephonyManager = (TelephonyManager) context.getSystemService(
                 Context.TELEPHONY_SERVICE);
-        this.dataUsageHandler = new Handler(Looper.getMainLooper());
+        this.statusHandler = new Handler(Looper.getMainLooper());
     }
 
     @NonNull
@@ -62,165 +71,176 @@ public class HotspotModule extends ReactContextBaseJavaModule {
         return "HotspotModule";
     }
 
+    // ---------------------------------------------------------------
+    // Proxy Server Controls
+    // ---------------------------------------------------------------
+
     /**
-     * Start the WiFi hotspot with the given configuration.
-     * Routes traffic through the mobile web browsing data interface.
+     * Start the local proxy server.
+     * This is the core of the POC — connected hotspot clients route traffic
+     * through this proxy, making it appear as phone-originated browsing.
      */
     @ReactMethod
-    public void startHotspot(ReadableMap config, Promise promise) {
-        try {
-            String ssid = config.getString("ssid");
-            String password = config.getString("password");
-            String securityType = config.getString("securityType");
+    public void startProxy(int port, Promise promise) {
+        if (isProxyRunning && proxyServer != null) {
+            promise.reject("ALREADY_RUNNING", "Proxy server is already running");
+            return;
+        }
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                // Android 8.0+ uses LocalOnlyHotspot or tethering manager
-                startLocalHotspot(ssid, password, securityType, promise);
-            } else {
-                // Older Android versions use WifiManager AP configuration
-                startLegacyHotspot(ssid, password, securityType, promise);
-            }
+        int proxyPort = port > 0 ? port : DEFAULT_PROXY_PORT;
+
+        try {
+            proxyServer = new ProxyServer(proxyPort);
+            proxyServer.start();
+            isProxyRunning = true;
+
+            startStatusPolling();
+
+            WritableMap result = Arguments.createMap();
+            result.putBoolean("success", true);
+            result.putInt("port", proxyPort);
+            result.putString("ip", getHotspotIpAddress());
+            promise.resolve(result);
+
+            Log.i(TAG, "Proxy started on port " + proxyPort);
         } catch (Exception e) {
-            promise.reject("HOTSPOT_START_ERROR", "Failed to start hotspot: " + e.getMessage());
+            isProxyRunning = false;
+            promise.reject("PROXY_START_ERROR",
+                    "Failed to start proxy: " + e.getMessage());
         }
     }
 
     /**
-     * Start hotspot on Android 8.0+ using LocalOnlyHotspot API
-     * with tethering to share mobile browsing data.
-     */
-    private void startLocalHotspot(String ssid, String password, String securityType, Promise promise) {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                wifiManager.startLocalOnlyHotspot(new WifiManager.LocalOnlyHotspotCallback() {
-                    @Override
-                    public void onStarted(WifiManager.LocalOnlyHotspotReservation reservation) {
-                        super.onStarted(reservation);
-                        isHotspotActive = true;
-                        startDataUsageTracking();
-
-                        WritableMap result = Arguments.createMap();
-                        result.putBoolean("success", true);
-                        result.putString("ssid", ssid);
-                        promise.resolve(result);
-
-                        emitEvent("onHotspotStateChanged",
-                                createStateEvent(true, ssid));
-                    }
-
-                    @Override
-                    public void onStopped() {
-                        super.onStopped();
-                        isHotspotActive = false;
-                        stopDataUsageTracking();
-                        emitEvent("onHotspotStateChanged",
-                                createStateEvent(false, ""));
-                    }
-
-                    @Override
-                    public void onFailed(int reason) {
-                        super.onFailed(reason);
-                        promise.reject("HOTSPOT_FAILED",
-                                "Hotspot failed with reason: " + reason);
-                    }
-                }, new Handler(Looper.getMainLooper()));
-            }
-        } catch (SecurityException e) {
-            promise.reject("PERMISSION_ERROR",
-                    "Missing required permissions: " + e.getMessage());
-        }
-    }
-
-    /**
-     * Legacy hotspot start for pre-Android 8.0 devices.
-     */
-    private void startLegacyHotspot(String ssid, String password, String securityType, Promise promise) {
-        try {
-            // Use reflection to access setWifiApEnabled on older Android versions
-            java.lang.reflect.Method method = wifiManager.getClass()
-                    .getMethod("setWifiApEnabled",
-                            android.net.wifi.WifiConfiguration.class, boolean.class);
-
-            android.net.wifi.WifiConfiguration wifiConfig = new android.net.wifi.WifiConfiguration();
-            wifiConfig.SSID = ssid;
-            wifiConfig.preSharedKey = password;
-            wifiConfig.allowedKeyManagement.set(
-                    android.net.wifi.WifiConfiguration.KeyMgmt.WPA_PSK);
-
-            // Disable regular WiFi first
-            wifiManager.setWifiEnabled(false);
-
-            boolean result = (Boolean) method.invoke(wifiManager, wifiConfig, true);
-
-            if (result) {
-                isHotspotActive = true;
-                startDataUsageTracking();
-
-                WritableMap response = Arguments.createMap();
-                response.putBoolean("success", true);
-                response.putString("ssid", ssid);
-                promise.resolve(response);
-            } else {
-                promise.reject("HOTSPOT_START_ERROR", "Failed to enable hotspot");
-            }
-        } catch (Exception e) {
-            promise.reject("HOTSPOT_START_ERROR",
-                    "Legacy hotspot start failed: " + e.getMessage());
-        }
-    }
-
-    /**
-     * Stop the WiFi hotspot.
+     * Stop the local proxy server.
      */
     @ReactMethod
-    public void stopHotspot(Promise promise) {
+    public void stopProxy(Promise promise) {
         try {
-            isHotspotActive = false;
-            stopDataUsageTracking();
+            if (proxyServer != null) {
+                proxyServer.stop();
+                proxyServer = null;
+            }
+            isProxyRunning = false;
+            stopStatusPolling();
 
             WritableMap result = Arguments.createMap();
             result.putBoolean("success", true);
             promise.resolve(result);
 
-            emitEvent("onHotspotStateChanged", createStateEvent(false, ""));
+            Log.i(TAG, "Proxy stopped");
         } catch (Exception e) {
-            promise.reject("HOTSPOT_STOP_ERROR",
-                    "Failed to stop hotspot: " + e.getMessage());
+            promise.reject("PROXY_STOP_ERROR",
+                    "Failed to stop proxy: " + e.getMessage());
         }
     }
 
     /**
-     * Get current hotspot status.
+     * Get current proxy server status.
      */
     @ReactMethod
-    public void getHotspotStatus(Promise promise) {
+    public void getProxyStatus(Promise promise) {
         WritableMap status = Arguments.createMap();
-        status.putBoolean("isActive", isHotspotActive);
-
-        WritableMap dataUsage = Arguments.createMap();
-        dataUsage.putDouble("session", 0);
-        dataUsage.putDouble("total", totalBytesTracked);
-        dataUsage.putDouble("uploaded", 0);
-        dataUsage.putDouble("downloaded", 0);
-        status.putMap("dataUsage", dataUsage);
-
-        status.putArray("connectedDevices", getConnectedDevicesList());
-
+        status.putBoolean("isRunning", isProxyRunning && proxyServer != null && proxyServer.isRunning());
+        status.putInt("port", proxyServer != null ? proxyServer.getPort() : DEFAULT_PROXY_PORT);
+        status.putString("ip", getHotspotIpAddress());
+        status.putDouble("bytesTransferred", proxyServer != null ? proxyServer.getBytesTransferred() : 0);
+        status.putInt("activeConnections", proxyServer != null ? (int) proxyServer.getActiveConnections() : 0);
         promise.resolve(status);
     }
 
+    // ---------------------------------------------------------------
+    // System Hotspot Controls
+    // ---------------------------------------------------------------
+
     /**
-     * Get list of connected devices by reading the ARP table.
+     * Open the system hotspot/tethering settings.
+     * The user enables the real Android hotspot from there.
      */
     @ReactMethod
-    public void getConnectedDevices(Promise promise) {
-        promise.resolve(getConnectedDevicesList());
+    public void openHotspotSettings(Promise promise) {
+        try {
+            Intent intent = new Intent(Settings.ACTION_WIRELESS_SETTINGS);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+
+            // Try the tethering settings directly first
+            try {
+                Intent tetherIntent = new Intent();
+                tetherIntent.setClassName("com.android.settings",
+                        "com.android.settings.TetherSettings");
+                tetherIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                reactContext.startActivity(tetherIntent);
+            } catch (Exception e) {
+                // Fall back to general wireless settings
+                reactContext.startActivity(intent);
+            }
+
+            WritableMap result = Arguments.createMap();
+            result.putBoolean("success", true);
+            promise.resolve(result);
+        } catch (Exception e) {
+            promise.reject("SETTINGS_ERROR",
+                    "Could not open hotspot settings: " + e.getMessage());
+        }
     }
 
     /**
-     * Read ARP table to find connected devices.
+     * Check if a mobile data connection is available.
      */
-    private WritableArray getConnectedDevicesList() {
+    @ReactMethod
+    public void checkMobileData(Promise promise) {
+        WritableMap result = Arguments.createMap();
+
+        boolean hasMobileData = false;
+        boolean hasWifi = false;
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            Network activeNetwork = connectivityManager.getActiveNetwork();
+            if (activeNetwork != null) {
+                NetworkCapabilities caps = connectivityManager.getNetworkCapabilities(activeNetwork);
+                if (caps != null) {
+                    hasMobileData = caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR);
+                    hasWifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI);
+                }
+            }
+        }
+
+        result.putBoolean("hasMobileData", hasMobileData);
+        result.putBoolean("hasWifi", hasWifi);
+        result.putBoolean("isReady", hasMobileData);
+        promise.resolve(result);
+    }
+
+    // ---------------------------------------------------------------
+    // Network Info
+    // ---------------------------------------------------------------
+
+    /**
+     * Get mobile network information.
+     */
+    @ReactMethod
+    public void getNetworkInfo(Promise promise) {
+        WritableMap info = Arguments.createMap();
+
+        try {
+            String carrier = telephonyManager.getNetworkOperatorName();
+            info.putString("carrierName", carrier != null && !carrier.isEmpty() ? carrier : "Unknown");
+
+            int networkTypeInt = telephonyManager.getNetworkType();
+            info.putString("networkType", getNetworkTypeName(networkTypeInt));
+        } catch (SecurityException e) {
+            info.putString("carrierName", "Unknown");
+            info.putString("networkType", "Unknown");
+        }
+
+        info.putString("hotspotIp", getHotspotIpAddress());
+        promise.resolve(info);
+    }
+
+    /**
+     * Get the devices connected to the hotspot (reads ARP table).
+     */
+    @ReactMethod
+    public void getConnectedDevices(Promise promise) {
         WritableArray devices = Arguments.createArray();
 
         try {
@@ -235,134 +255,80 @@ public class HotspotModule extends ReactContextBaseJavaModule {
                     String mac = parts[3];
                     String flags = parts[2];
 
-                    // Only include valid entries (flag 0x2 = reachable)
                     if (!mac.equals("00:00:00:00:00:00") && flags.equals("0x2")) {
                         WritableMap device = Arguments.createMap();
                         device.putString("ipAddress", ip);
                         device.putString("macAddress", mac);
-                        device.putString("deviceName", resolveHostname(ip));
-                        device.putDouble("dataUsed", 0);
                         devices.pushMap(device);
                     }
                 }
             }
             reader.close();
         } catch (Exception e) {
-            // ARP table may not be accessible; return empty list
+            Log.d(TAG, "Could not read ARP table: " + e.getMessage());
         }
 
-        return devices;
+        promise.resolve(devices);
     }
 
+    // ---------------------------------------------------------------
+    // Helpers
+    // ---------------------------------------------------------------
+
     /**
-     * Attempt to resolve hostname from IP address.
+     * Get the phone's IP address on the hotspot interface.
+     * This is the IP that clients need to configure as their proxy address.
      */
-    private String resolveHostname(String ipAddress) {
+    private String getHotspotIpAddress() {
         try {
-            InetAddress addr = InetAddress.getByName(ipAddress);
-            String hostname = addr.getHostName();
-            return hostname.equals(ipAddress) ? "Unknown Device" : hostname;
-        } catch (Exception e) {
-            return "Unknown Device";
-        }
-    }
-
-    /**
-     * Get mobile network information.
-     */
-    @ReactMethod
-    public void getNetworkInfo(Promise promise) {
-        WritableMap info = Arguments.createMap();
-
-        try {
-            String carrier = telephonyManager.getNetworkOperatorName();
-            info.putString("carrierName", carrier != null ? carrier : "Unknown");
-
-            int networkTypeInt = telephonyManager.getNetworkType();
-            info.putString("networkType", getNetworkTypeName(networkTypeInt));
-            info.putInt("signalStrength", 70); // Placeholder; real impl uses PhoneStateListener
-            info.putBoolean("isUnlimitedPlan", false); // Determined by carrier API or user setting
-        } catch (SecurityException e) {
-            info.putString("carrierName", "Permission Required");
-            info.putString("networkType", "Unknown");
-            info.putInt("signalStrength", 0);
-            info.putBoolean("isUnlimitedPlan", false);
-        }
-
-        promise.resolve(info);
-    }
-
-    /**
-     * Get data usage statistics.
-     */
-    @ReactMethod
-    public void getDataUsage(Promise promise) {
-        WritableMap usage = Arguments.createMap();
-        usage.putDouble("session", 0);
-        usage.putDouble("total", totalBytesTracked);
-        usage.putDouble("uploaded", 0);
-        usage.putDouble("downloaded", 0);
-        promise.resolve(usage);
-    }
-
-    /**
-     * Check if required permissions are granted.
-     */
-    @ReactMethod
-    public void checkPermissions(Promise promise) {
-        WritableMap result = Arguments.createMap();
-        // Check for CHANGE_WIFI_STATE, ACCESS_WIFI_STATE, ACCESS_FINE_LOCATION, etc.
-        boolean granted = reactContext.checkSelfPermission(
-                android.Manifest.permission.ACCESS_FINE_LOCATION)
-                == android.content.pm.PackageManager.PERMISSION_GRANTED;
-        result.putBoolean("granted", granted);
-        promise.resolve(result);
-    }
-
-    /**
-     * Request required permissions.
-     */
-    @ReactMethod
-    public void requestPermissions(Promise promise) {
-        // Permission request handled via React Native PermissionsAndroid
-        WritableMap result = Arguments.createMap();
-        result.putBoolean("granted", false);
-        result.putString("message", "Use PermissionsAndroid.request() from JavaScript side");
-        promise.resolve(result);
-    }
-
-    // ---- Helpers ----
-
-    private void startDataUsageTracking() {
-        dataUsageHandler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                if (isHotspotActive) {
-                    emitDataUsageUpdate();
-                    dataUsageHandler.postDelayed(this, 5000); // Update every 5 seconds
+            List<NetworkInterface> interfaces = Collections.list(
+                    NetworkInterface.getNetworkInterfaces());
+            for (NetworkInterface iface : interfaces) {
+                // Hotspot interfaces are commonly named swlan0, wlan0, ap0, etc.
+                String name = iface.getName();
+                if (name.contains("ap") || name.contains("swlan") ||
+                    name.contains("wlan") || name.contains("rndis")) {
+                    List<InetAddress> addrs = Collections.list(iface.getInetAddresses());
+                    for (InetAddress addr : addrs) {
+                        if (!addr.isLoopbackAddress() && addr instanceof Inet4Address) {
+                            return addr.getHostAddress();
+                        }
+                    }
                 }
             }
-        }, 5000);
+
+            // Fallback: return any non-loopback IPv4
+            for (NetworkInterface iface : interfaces) {
+                List<InetAddress> addrs = Collections.list(iface.getInetAddresses());
+                for (InetAddress addr : addrs) {
+                    if (!addr.isLoopbackAddress() && addr instanceof Inet4Address) {
+                        return addr.getHostAddress();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Error getting hotspot IP: " + e.getMessage());
+        }
+        return "192.168.43.1"; // Common default Android hotspot IP
     }
 
-    private void stopDataUsageTracking() {
-        dataUsageHandler.removeCallbacksAndMessages(null);
+    private void startStatusPolling() {
+        statusHandler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (isProxyRunning && proxyServer != null) {
+                    WritableMap status = Arguments.createMap();
+                    status.putDouble("bytesTransferred", proxyServer.getBytesTransferred());
+                    status.putInt("activeConnections", (int) proxyServer.getActiveConnections());
+                    emitEvent("onProxyStatusUpdate", status);
+                    statusHandler.postDelayed(this, 3000);
+                }
+            }
+        }, 3000);
     }
 
-    private void emitDataUsageUpdate() {
-        WritableMap usage = Arguments.createMap();
-        usage.putDouble("session", 0);
-        usage.putDouble("total", totalBytesTracked);
-        usage.putDouble("uploaded", 0);
-        usage.putDouble("downloaded", 0);
-        emitEvent("onDataUsageUpdated", usage);
-    }
-
-    private WritableMap createStateEvent(boolean active, String ssid) {
-        WritableMap event = Arguments.createMap();
-        event.putBoolean("isActive", active);
-        event.putString("ssid", ssid);
-        return event;
+    private void stopStatusPolling() {
+        statusHandler.removeCallbacksAndMessages(null);
     }
 
     private void emitEvent(String eventName, WritableMap params) {
@@ -379,11 +345,11 @@ public class HotspotModule extends ReactContextBaseJavaModule {
         switch (type) {
             case TelephonyManager.NETWORK_TYPE_LTE: return "4G LTE";
             case TelephonyManager.NETWORK_TYPE_NR: return "5G";
-            case TelephonyManager.NETWORK_TYPE_HSPAP: return "3G HSPA+";
-            case TelephonyManager.NETWORK_TYPE_HSPA: return "3G HSPA";
+            case TelephonyManager.NETWORK_TYPE_HSPAP: return "3G+";
+            case TelephonyManager.NETWORK_TYPE_HSPA: return "3G";
             case TelephonyManager.NETWORK_TYPE_UMTS: return "3G";
-            case TelephonyManager.NETWORK_TYPE_EDGE: return "2G EDGE";
-            case TelephonyManager.NETWORK_TYPE_GPRS: return "2G GPRS";
+            case TelephonyManager.NETWORK_TYPE_EDGE: return "2G";
+            case TelephonyManager.NETWORK_TYPE_GPRS: return "2G";
             default: return "Unknown";
         }
     }

@@ -2,198 +2,114 @@ import { NativeModules, NativeEventEmitter, Platform } from 'react-native';
 
 const { HotspotModule } = NativeModules;
 
+/**
+ * Service layer for the Mobile Hotspot Broadcast POC.
+ *
+ * How it works:
+ * 1. User enables Android's built-in WiFi hotspot (via system settings)
+ * 2. This app starts a local HTTP/HTTPS proxy server on the phone
+ * 3. Connected devices configure their proxy to point at the phone's IP + port
+ * 4. All traffic routes through the phone's mobile data → carrier sees phone browsing
+ */
 class HotspotService {
   constructor() {
     this.eventEmitter = null;
     this.listeners = new Map();
-    this._setupEventEmitter();
-  }
-
-  _setupEventEmitter() {
     if (HotspotModule) {
       this.eventEmitter = new NativeEventEmitter(HotspotModule);
     }
   }
 
   /**
-   * Start broadcasting the mobile hotspot.
-   * Routes mobile web browsing data through the hotspot interface.
+   * Start the local proxy server on the given port.
+   * Returns { success, port, ip }.
    */
-  async startHotspot(config) {
+  async startProxy(port = 8080) {
     if (!HotspotModule) {
-      throw new Error('HotspotModule is not available on this platform');
+      throw new Error('Native module not available');
     }
-
-    const { ssid, password, securityType, band } = config;
-
-    try {
-      const result = await HotspotModule.startHotspot({
-        ssid: ssid || 'MyMobileHotspot',
-        password: password || 'secure1234',
-        securityType: securityType || 'WPA2',
-        band: band || '2.4GHz',
-        // Key: route through mobile web browsing interface
-        routeThroughBrowser: true,
-      });
-      return result;
-    } catch (error) {
-      throw new Error(`Failed to start hotspot: ${error.message}`);
-    }
+    return await HotspotModule.startProxy(port);
   }
 
   /**
-   * Stop the mobile hotspot broadcast.
+   * Stop the local proxy server.
    */
-  async stopHotspot() {
+  async stopProxy() {
     if (!HotspotModule) {
-      throw new Error('HotspotModule is not available on this platform');
+      throw new Error('Native module not available');
     }
-
-    try {
-      return await HotspotModule.stopHotspot();
-    } catch (error) {
-      throw new Error(`Failed to stop hotspot: ${error.message}`);
-    }
+    return await HotspotModule.stopProxy();
   }
 
   /**
-   * Get current hotspot status and connected device info.
+   * Get proxy server status: isRunning, port, ip, bytesTransferred, activeConnections.
    */
-  async getHotspotStatus() {
+  async getProxyStatus() {
     if (!HotspotModule) {
-      return {
-        isActive: false,
-        connectedDevices: [],
-        dataUsage: { session: 0, total: 0, uploaded: 0, downloaded: 0 },
-      };
+      return { isRunning: false, port: 8080, ip: '0.0.0.0', bytesTransferred: 0, activeConnections: 0 };
     }
-
-    try {
-      return await HotspotModule.getHotspotStatus();
-    } catch (error) {
-      throw new Error(`Failed to get hotspot status: ${error.message}`);
-    }
+    return await HotspotModule.getProxyStatus();
   }
 
   /**
-   * Get list of currently connected devices.
+   * Open the Android system hotspot/tethering settings.
+   */
+  async openHotspotSettings() {
+    if (!HotspotModule) {
+      throw new Error('Native module not available');
+    }
+    return await HotspotModule.openHotspotSettings();
+  }
+
+  /**
+   * Check if mobile data is active.
+   * Returns { hasMobileData, hasWifi, isReady }.
+   */
+  async checkMobileData() {
+    if (!HotspotModule) {
+      return { hasMobileData: false, hasWifi: false, isReady: false };
+    }
+    return await HotspotModule.checkMobileData();
+  }
+
+  /**
+   * Get mobile network info: carrierName, networkType, hotspotIp.
+   */
+  async getNetworkInfo() {
+    if (!HotspotModule) {
+      return { carrierName: 'Unknown', networkType: 'Unknown', hotspotIp: '0.0.0.0' };
+    }
+    return await HotspotModule.getNetworkInfo();
+  }
+
+  /**
+   * Get ARP-table connected devices.
    */
   async getConnectedDevices() {
     if (!HotspotModule) {
       return [];
     }
-
-    try {
-      return await HotspotModule.getConnectedDevices();
-    } catch (error) {
-      throw new Error(`Failed to get connected devices: ${error.message}`);
-    }
+    return await HotspotModule.getConnectedDevices();
   }
 
   /**
-   * Get current mobile network information.
-   */
-  async getNetworkInfo() {
-    if (!HotspotModule) {
-      return {
-        carrierName: 'Unknown',
-        networkType: 'Unknown',
-        signalStrength: 0,
-        isUnlimitedPlan: false,
-      };
-    }
-
-    try {
-      return await HotspotModule.getNetworkInfo();
-    } catch (error) {
-      throw new Error(`Failed to get network info: ${error.message}`);
-    }
-  }
-
-  /**
-   * Get current data usage statistics.
-   */
-  async getDataUsage() {
-    if (!HotspotModule) {
-      return { session: 0, total: 0, uploaded: 0, downloaded: 0 };
-    }
-
-    try {
-      return await HotspotModule.getDataUsage();
-    } catch (error) {
-      throw new Error(`Failed to get data usage: ${error.message}`);
-    }
-  }
-
-  /**
-   * Check if required permissions are granted.
-   */
-  async checkPermissions() {
-    if (!HotspotModule) {
-      return { granted: false, permissions: [] };
-    }
-
-    try {
-      return await HotspotModule.checkPermissions();
-    } catch (error) {
-      throw new Error(`Failed to check permissions: ${error.message}`);
-    }
-  }
-
-  /**
-   * Request required permissions for hotspot functionality.
-   */
-  async requestPermissions() {
-    if (!HotspotModule) {
-      return { granted: false };
-    }
-
-    try {
-      return await HotspotModule.requestPermissions();
-    } catch (error) {
-      throw new Error(`Failed to request permissions: ${error.message}`);
-    }
-  }
-
-  /**
-   * Subscribe to hotspot events.
+   * Subscribe to proxy status updates.
    */
   addEventListener(eventName, callback) {
     if (!this.eventEmitter) return null;
-
     const subscription = this.eventEmitter.addListener(eventName, callback);
     this.listeners.set(eventName, subscription);
     return subscription;
   }
 
-  /**
-   * Remove event listener.
-   */
-  removeEventListener(eventName) {
-    const subscription = this.listeners.get(eventName);
-    if (subscription) {
-      subscription.remove();
-      this.listeners.delete(eventName);
-    }
-  }
-
-  /**
-   * Remove all event listeners.
-   */
   removeAllListeners() {
-    this.listeners.forEach((subscription) => subscription.remove());
+    this.listeners.forEach((sub) => sub.remove());
     this.listeners.clear();
   }
 }
 
-// Event names for hotspot events
-export const HotspotEvents = {
-  DEVICE_CONNECTED: 'onDeviceConnected',
-  DEVICE_DISCONNECTED: 'onDeviceDisconnected',
-  DATA_USAGE_UPDATED: 'onDataUsageUpdated',
-  HOTSPOT_STATE_CHANGED: 'onHotspotStateChanged',
-  NETWORK_CHANGED: 'onNetworkChanged',
-  ERROR: 'onHotspotError',
+export const ProxyEvents = {
+  STATUS_UPDATE: 'onProxyStatusUpdate',
 };
 
 export default new HotspotService();

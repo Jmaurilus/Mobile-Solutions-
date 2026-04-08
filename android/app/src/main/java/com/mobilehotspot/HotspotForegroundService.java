@@ -13,15 +13,14 @@ import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 
 /**
- * Foreground service to keep the hotspot broadcasting alive
- * when the app is in the background.
+ * Foreground service to keep the proxy server alive when the app is backgrounded.
  *
- * This ensures the WiFi hotspot continues sharing the mobile
- * web browsing data even when the user switches to other apps.
+ * Android may kill background processes, which would stop the proxy and break
+ * connectivity for hotspot clients. This service prevents that.
  */
 public class HotspotForegroundService extends Service {
 
-    private static final String CHANNEL_ID = "hotspot_service_channel";
+    private static final String CHANNEL_ID = "hotspot_proxy_channel";
     private static final int NOTIFICATION_ID = 1001;
 
     @Override
@@ -53,10 +52,10 @@ public class HotspotForegroundService extends Service {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID,
-                    "Hotspot Service",
+                    "Hotspot Proxy Service",
                     NotificationManager.IMPORTANCE_LOW
             );
-            channel.setDescription("Keeps the mobile hotspot broadcast active");
+            channel.setDescription("Keeps the browsing proxy active for hotspot clients");
             channel.setShowBadge(false);
 
             NotificationManager manager = getSystemService(NotificationManager.class);
@@ -74,8 +73,8 @@ public class HotspotForegroundService extends Service {
         );
 
         return new NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("Mobile Hotspot Active")
-                .setContentText("Broadcasting your mobile browsing as WiFi hotspot")
+                .setContentTitle("Proxy Active")
+                .setContentText("Routing hotspot traffic through mobile browsing")
                 .setSmallIcon(android.R.drawable.ic_menu_share)
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)

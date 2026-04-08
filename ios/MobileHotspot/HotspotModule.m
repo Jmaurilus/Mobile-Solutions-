@@ -3,29 +3,26 @@
 
 @interface RCT_EXTERN_MODULE(HotspotModule, RCTEventEmitter)
 
-RCT_EXTERN_METHOD(startHotspot:(NSDictionary *)config
+RCT_EXTERN_METHOD(startProxy:(int)port
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(stopHotspot:(RCTPromiseResolveBlock)resolve
+RCT_EXTERN_METHOD(stopProxy:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(getHotspotStatus:(RCTPromiseResolveBlock)resolve
+RCT_EXTERN_METHOD(getProxyStatus:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(getConnectedDevices:(RCTPromiseResolveBlock)resolve
+RCT_EXTERN_METHOD(openHotspotSettings:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(checkMobileData:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
 RCT_EXTERN_METHOD(getNetworkInfo:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
-RCT_EXTERN_METHOD(getDataUsage:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(checkPermissions:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject)
-
-RCT_EXTERN_METHOD(requestPermissions:(RCTPromiseResolveBlock)resolve
+RCT_EXTERN_METHOD(getConnectedDevices:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
 @end
