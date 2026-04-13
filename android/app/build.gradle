@@ -1,0 +1,86 @@
+apply plugin: "com.android.application"
+
+import com.android.build.OutputFile
+
+project.ext.react = [
+    enableHermes: true,
+]
+
+apply from: "../../node_modules/react-native/react.gradle"
+
+/**
+ * APK signing config for release builds.
+ *
+ * To generate the release keystore (one-time):
+ *   cd android/app
+ *   keytool -genkeypair -v -storetype PKCS12 \
+ *     -keystore release.keystore -alias release-key \
+ *     -keyalg RSA -keysize 2048 -validity 10000 \
+ *     -storepass mobilehotspot -keypass mobilehotspot \
+ *     -dname "CN=MobileHotspot,O=Dev,L=Unknown,ST=Unknown,C=US"
+ */
+android {
+    namespace "com.mobilehotspot"
+    compileSdkVersion rootProject.ext.compileSdkVersion
+    buildToolsVersion rootProject.ext.buildToolsVersion
+
+    defaultConfig {
+        applicationId "com.mobilehotspot.broadcast"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 1
+        versionName "0.1.0-poc"
+    }
+
+    signingConfigs {
+        debug {
+            storeFile file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+        release {
+            if (project.hasProperty('MYAPP_UPLOAD_STORE_FILE')) {
+                storeFile file(MYAPP_UPLOAD_STORE_FILE)
+                storePassword MYAPP_UPLOAD_STORE_PASSWORD
+                keyAlias MYAPP_UPLOAD_KEY_ALIAS
+                keyPassword MYAPP_UPLOAD_KEY_PASSWORD
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
+
+            signingConfig signingConfigs.release
+        }
+    }
+
+    packagingOptions {
+        pickFirst '**/libc++_shared.so'
+        pickFirst '**/libfbjni.so'
+    }
+}
+
+dependencies {
+    implementation "com.facebook.react:react-android"
+
+    // AndroidX
+    implementation "androidx.core:core:1.12.0"
+    implementation "androidx.appcompat:appcompat:1.6.1"
+
+    if (hermesEnabled.toBoolean()) {
+        implementation("com.facebook.react:hermes-android")
+    } else {
+        implementation jscFlavor
+    }
+}
+
+apply from: file("../../node_modules/@react-native-community/cli-platform-android/native_modules.gradle")
+applyNativeModulesAppBuildGradle(project)
